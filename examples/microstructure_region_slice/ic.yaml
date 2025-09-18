@@ -1,0 +1,65 @@
+steps:
+- additivefoam:
+    class: solidification_region_reduced
+    application: additivefoam
+    configure: {coarse: 80e-6, rx: 0.0005, ry: 0.0005, rz: 0.0003, pad-xy: 0.0005,
+      pad-z: 0.0001, pad-sub: 0.0025, refine-layer: 1, refine-region: 1}
+    execute: {batch: true, cores: 2}
+- exaca:
+    class: microstructure_region_slice
+    application: exaca
+    executable: ExaCA
+    configure: {cell-size: 2.5, sub-size: 12.3, nd: 250, mu: 21, std: 3}
+    execute: {batch: true, np: 8}
+data:
+  build:
+    datatype: Peregrine
+    name: myna_output
+    path: ..
+    parts:
+      P5:
+        regions:
+          r1:
+            layers: [51, 52]
+            x: 0.2
+            y: 0.021
+            layer_data:
+              '51':
+                scanpath: {file_local: 'C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\myna_resources\P5\51\scanpath.txt',
+                  file_database: ..\Peregrine\simulation\meltpool\P5\0000051.txt}
+              '52':
+                scanpath: {file_local: 'C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\myna_resources\P5\52\scanpath.txt',
+                  file_database: ..\Peregrine\simulation\meltpool\P5\0000052.txt}
+        layers: []
+        spot_size: {value: 0.13, unit: mm}
+        laser_power: {value: 350.0, unit: W}
+    build_regions: {}
+    cui-markings: {flag_sensitive: null, bannerLine: null, signatureBlock: null}
+    build_data:
+      preheat: {value: 298.15, unit: K}
+      material: {value: SS316L, unit: ''}
+      layer_thickness: {value: 5.0e-05, unit: m}
+  output_paths:
+    additivefoam: ['C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\myna_output\P5\r1\51\additivefoam\solidification_region_reduced-additivefoam-FileReducedSolidification.csv',
+      'C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\myna_output\P5\r1\52\additivefoam\solidification_region_reduced-additivefoam-FileReducedSolidification.csv']
+    exaca: ['C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\myna_output\P5\r1\exaca\microstructure_region_slice-exaca-FileGrainSlice.csv']
+myna:
+  version: 1.2.0.dev0
+  configure: {datetime-start: '2025-06-11 09:57:28', user-login: ygk, input-file: 'C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\input.yaml',
+    output-file: 'C:\Users\ygk\Apps\Myna\examples\microstructure_region_slice\ic.yaml',
+    datetime-end: '2025-06-11 09:57:32'}
+  git:
+    commit: 266f2a869f4f973924c51d71d0a9f41492486c8f
+    branch: main
+    origin: https://github.com/ORNL-MDF/Myna
+    is_dirty: true
+    dirty_files: [src/myna/core/app/base.py, src/myna/database/peregrine_hdf5.py]
+    untracked_files: [examples/solidification_part/ic.yaml, src/myna/application/thesis/solidification_region_reduced/configure.py,
+      src/myna/application/thesis/solidification_region_reduced/execute.py, src/myna/application/thesis/solidification_region_reduced/template/Beam.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/Domain.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/Material.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/Mode.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/Output.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/ParamInput.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/Path.txt,
+      src/myna/application/thesis/solidification_region_reduced/template/Settings.txt]

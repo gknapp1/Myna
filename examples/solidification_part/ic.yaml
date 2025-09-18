@@ -1,0 +1,30 @@
+steps:
+- 3dthesis:
+    class: solidification_part
+    application: thesis
+    configure: {res: 5.0e-05}
+    execute: {np: 8}
+data:
+  build:
+    datatype: Peregrine
+    name: myna_output
+    path: ..
+    parts:
+      P5:
+        layers: [51]
+        spot_size: {value: 0.13, unit: mm}
+        laser_power: {value: 350.0, unit: W}
+        layer_data:
+          '51':
+            scanpath: {file_local: 'C:\Users\ygk\Apps\Myna\examples\solidification_part\myna_resources\P5\51\scanpath.txt',
+              file_database: ..\Peregrine\simulation\meltpool\P5\0000051.txt}
+    cui-markings: {flag_sensitive: null, bannerLine: null, signatureBlock: null}
+    build_data:
+      preheat: {value: 298.15, unit: K}
+      material: {value: SS316L, unit: ''}
+      layer_thickness: {value: 5.0e-05, unit: m}
+  output_paths:
+    3dthesis: ['C:\Users\ygk\Apps\Myna\examples\solidification_part\myna_output\P5\51\3dthesis\solidification_part-3dthesis-FileGV.csv']
+myna:
+  workspace: ../example-workspace.yaml
+  configure: {date: '2024-11-04 13:52:26', user-login: ygk}

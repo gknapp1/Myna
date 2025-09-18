@@ -1,0 +1,18 @@
+X
+{
+	XMin	-1e-3
+	XMax	1e-3
+	Res	12.5e-6
+}
+Y
+{
+	YMin	-1e-3
+	YMax	1e-3
+	Res	12.5e-6
+}
+Z
+{
+	Min	-250e-6
+	Max	0.0
+	Res	12.5e-6
+}

@@ -14,6 +14,7 @@ import warnings
 import h5py
 import numpy as np
 import pandas as pd
+import polars as pl
 from myna.core import metadata
 from myna.database.peregrine import PeregrineDB
 from myna.core.utils import get_synonymous_key
@@ -132,8 +133,8 @@ class PeregrineHDF5(PeregrineDB):
             if value > 10:
                 value = value * 1e-3
                 warn_msg = (
-                    f"Large spot size detected ({value} mm),"
-                    + f" assuming conversion um to mm (--> {value*1e-3} mm)"
+                    f"Large spot size detected ({value * 1e3} mm),"
+                    + f" assuming conversion um to mm (--> {value} mm)"
                 )
                 warnings.warn(warn_msg)
 
@@ -270,6 +271,16 @@ class PeregrineHDF5(PeregrineDB):
 
                 if len(df_scan) > 0:
                     time_end_last = 0.0
+                    row_dfs = []
+                    schema = {
+                        "Mode": int,
+                        "X(mm)": float,
+                        "Y(mm)": float,
+                        "Z(mm)": float,
+                        "Pmod": float,
+                        "tParam": float,
+                    }
+                    counter = 0
                     for row_index, row in df_scan.iterrows():
                         duration = np.power(
                             np.power(row["xe"] - row["xs"], 2)
@@ -277,11 +288,12 @@ class PeregrineHDF5(PeregrineDB):
                             0.5,
                         ) / (scan_speed * 1e3)
                         # assume scan path starts from 0.0 elapsed time
-                        if row_index == 0:
+                        if counter == 0:
                             time_end_last = row["time_end"] - duration
                         delay = max(row["time_end"] - duration - time_end_last, 0)
                         z = data.attrs["material/layer_thickness"] * float(layer)
-                        df_row_move = pd.DataFrame(
+                        # df_row_move = pd.DataFrame(
+                        df_row_move = pl.DataFrame(
                             {
                                 "Mode": [1],
                                 "X(mm)": [row["xs"]],
@@ -289,9 +301,11 @@ class PeregrineHDF5(PeregrineDB):
                                 "Z(mm)": [z],
                                 "Pmod": [0],
                                 "tParam": [delay],
-                            }
+                            },
+                            schema=schema
                         )
-                        df_row_scan = pd.DataFrame(
+                        # df_row_scan = pd.DataFrame(
+                        df_row_scan = pl.DataFrame(
                             {
                                 "Mode": [0],
                                 "X(mm)": [row["xe"]],
@@ -299,15 +313,23 @@ class PeregrineHDF5(PeregrineDB):
                                 "Z(mm)": [z],
                                 "Pmod": [1],
                                 "tParam": [scan_speed],
-                            }
+                            },
+                            schema=schema
                         )
                         time_end_last = row["time_end"]
                         if len(df_converted) == 0:
-                            df_converted = pd.concat([df_row_move, df_row_scan])
+                            row_dfs.append(df_row_move)
+                            row_dfs.append(df_row_scan)
+                            # df_converted = pd.concat([df_row_move, df_row_scan])
                         else:
-                            df_converted = pd.concat(
-                                [df_converted, df_row_move, df_row_scan]
-                            )
-                df_converted.to_csv(file_database, sep="\t", index=False)
+                            row_dfs.append(df_row_move)
+                            row_dfs.append(df_row_scan)
+                            # df_converted = pd.concat(
+                            #     [df_converted, df_row_move, df_row_scan]
+                            # )
+                        counter += 1
+                    df_converted = pl.concat(row_dfs)
+                # df_converted.to_csv(file_database, sep="\t", index=False)
+                df_converted.write_csv(file_database, separator="\t")
 
         return file_database
