@@ -1,0 +1,18 @@
+steps:
+- train_model:
+    application: pytorch
+    class: grain_stat_predictor_trainer
+    configure:
+      training-data-dir: Z:/ConceptLaserM2-ORNL1/2024/01/2024-01-26 M2_AMMT_DOE_10/Myna/cases_ammt_doe_10
+      test-train-split: 0.8
+    execute:
+      batch-size: 4
+      epochs: 50
+      learning-rate: 1.0e-4
+      beta: 0.1
+      no-training: False
+data:
+  build:
+    name: myna_output
+    datatype: Peregrine
+    path: Z:/ConceptLaserM2-ORNL1/2024/01/2024-01-26 M2_AMMT_DOE_10

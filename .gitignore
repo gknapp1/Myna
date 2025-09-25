@@ -15,19 +15,22 @@ build
 # VS Code
 *.code-workspace
 
-# typical output folder names
+# typical output folder names and file types
 myna_resources/
 demo_build/
 myna_output/
+logs/
+*.parquet
+*.png
+*.pt
+*configured.yaml
+ic.yaml
+log.*
+*.log
+
+# database-specific folders
 examples/Peregrine/registered
 examples/Peregrine/simulation
 examples/PeregrineHDF5/simulation
 examples/PeregrineHDF5/registered
 examples/Pelican/myna_scanpaths
-*.parquet
-
-# other typical case file names
-*configured.yaml
-log.*
-*.log
-logs/

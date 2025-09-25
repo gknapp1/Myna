@@ -9,6 +9,7 @@
 """Base class for workflow components"""
 
 import os
+import sys
 import subprocess
 import myna
 import myna.database
@@ -53,7 +54,7 @@ class Component:
             "configure.py",
         )
         if os.path.exists(configure_path):
-            cmd = ["python", configure_path]
+            cmd = [sys.executable, configure_path]
             cmd.extend(self.get_step_args_list("configure"))
             cmd = self.cmd_preformat(cmd)
             print(f"myna run: {cmd=}")
@@ -69,7 +70,7 @@ class Component:
             "execute.py",
         )
         if os.path.exists(execute_path):
-            cmd = ["python", execute_path]
+            cmd = [sys.executable, execute_path]
             cmd.extend(self.get_step_args_list("execute"))
             cmd = self.cmd_preformat(cmd)
             print(f"myna run: {cmd=}")
@@ -85,7 +86,7 @@ class Component:
             "postprocess.py",
         )
         if os.path.exists(postprocess_path):
-            cmd = ["python", postprocess_path]
+            cmd = [sys.executable, postprocess_path]
             cmd.extend(self.get_step_args_list("postprocess"))
             cmd = self.cmd_preformat(cmd)
             print(f"myna run: {cmd=}")
@@ -94,9 +95,10 @@ class Component:
 
         # Check output of component
         output_files, _, valid = self.get_output_files()
-        if len(output_files) > 0:
+        no_expected_output = self.output_requirement is None
+        if (len(output_files) > 0) or (no_expected_output):
             if has_executed:
-                if all(valid):
+                if all(valid) or no_expected_output:
                     print(f"All output files are valid for step {self.name}.")
                 else:
                     print(

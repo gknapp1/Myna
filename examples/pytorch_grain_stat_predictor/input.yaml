@@ -1,0 +1,15 @@
+steps:
+- run_model:
+    application: pytorch
+    class: grain_stat_predictor
+    execute:
+      trained-model-dir: C:/Users/ygk/Apps/Myna/examples/pytorch_grain_stat_predictor_trainer
+      thermal-data-dir: Z:/ConceptLaserM2-ORNL1/2024/01/2024-01-26 M2_AMMT_DOE_10/Myna/cases_ammt_doe_10/P10/R1
+      layer-start: 10
+      layer-stop: 13
+      batch-size: 4
+data:
+  build:
+    name: myna_output
+    datatype: Peregrine
+    path: Z:/ConceptLaserM2-ORNL1/2024/01/2024-01-26 M2_AMMT_DOE_10

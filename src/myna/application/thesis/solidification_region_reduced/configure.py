@@ -27,7 +27,9 @@ def configure_case(app, case_dir, res, myna_input="myna_data.yaml"):
     # Get part and layer info
     part = list(settings["build"]["parts"].keys())[0]
     region = list(settings["build"]["parts"][part]["regions"].keys())[0]
-    layer = list(settings["build"]["parts"][part]["regions"][region]["layer_data"].keys())[0]
+    layer = list(
+        settings["build"]["parts"][part]["regions"][region]["layer_data"].keys()
+    )[0]
     x_center = settings["build"]["parts"][part]["regions"][region]["x"]
     y_center = settings["build"]["parts"][part]["regions"][region]["y"]
 
@@ -36,9 +38,9 @@ def configure_case(app, case_dir, res, myna_input="myna_data.yaml"):
     app.copy(case_dir)
 
     # Set up scan path
-    myna_scanfile = settings["build"]["parts"][part]["regions"][region]["layer_data"][layer]["scanpath"][
-        "file_local"
-    ]
+    myna_scanfile = settings["build"]["parts"][part]["regions"][region]["layer_data"][
+        layer
+    ]["scanpath"]["file_local"]
     case_scanfile = os.path.join(case_dir, "Path.txt")
     shutil.copy(myna_scanfile, case_scanfile)
     df = pl.read_csv(case_scanfile, separator="\t")

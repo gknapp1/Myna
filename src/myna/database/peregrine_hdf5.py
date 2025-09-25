@@ -302,7 +302,7 @@ class PeregrineHDF5(PeregrineDB):
                                 "Pmod": [0],
                                 "tParam": [delay],
                             },
-                            schema=schema
+                            schema=schema,
                         )
                         # df_row_scan = pd.DataFrame(
                         df_row_scan = pl.DataFrame(
@@ -314,7 +314,7 @@ class PeregrineHDF5(PeregrineDB):
                                 "Pmod": [1],
                                 "tParam": [scan_speed],
                             },
-                            schema=schema
+                            schema=schema,
                         )
                         time_end_last = row["time_end"]
                         if len(df_converted) == 0:

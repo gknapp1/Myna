@@ -132,9 +132,9 @@ def config(input_file, output_file=None, show_avail=False, overwrite=False):
     all_parts = list(set(all_parts))
 
     # Check that some amount of parts were specified
-    if len(all_parts) < 1:
-        print(f"ERROR: No parts specified in {input_file}")
-        raise ValueError
+    # if len(all_parts) < 1:
+    #     print(f"ERROR: No parts specified in {input_file}")
+    #     raise ValueError
 
     # Get list of all segments in build parts and build_region parts
     # Possible options for types segments are:
