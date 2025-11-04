@@ -6,18 +6,19 @@ import torch.nn.functional as F
 
 
 def _augment_batch_random(batch_inputs: torch.Tensor) -> torch.Tensor:
-    # Circular Depth Shift (a->b->c is like b->c->a)
-    depth = batch_inputs.shape[4]
+    # Canonical tensor layout in this codebase is (N, C, D, H, W).
+    # Circular Depth Shift (shift along the D axis which is index 2)
+    depth = batch_inputs.shape[2]
     shift = torch.randint(0, depth, (1,)).item()
     augmented_batch = torch.roll(batch_inputs, shifts=shift, dims=2)
 
-    # Random 90-degree Rotations in the H-W plane
+    # Random 90-degree Rotations in the H-W plane (indices 3 and 4)
     k = torch.randint(0, 4, (1,)).item()  # 0, 1, 2, or 3 rotations
-    augmented_batch = torch.rot90(augmented_batch, k, dims=[2, 3])
+    augmented_batch = torch.rot90(augmented_batch, k, dims=[3, 4])
 
-    # Random Flip
+    # Random Flip along the W axis (index 4)
     if torch.rand(1) > 0.5:
-        augmented_batch = torch.flip(augmented_batch, dims=[3])
+        augmented_batch = torch.flip(augmented_batch, dims=[4])
 
     return augmented_batch
 
@@ -26,27 +27,30 @@ def _augment_batch_exhaustive(
     batch_inputs: torch.Tensor, batch_targets: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
+    # Canonical tensor layout in this codebase is (N, C, D, H, W).
     # Get shapes
-    D = batch_inputs.shape[4]
-    num_augmentations = D * 4 * 2  #  D depth shifts, 4 rotations, 2 flip states
+    D = batch_inputs.shape[2]
+    num_augmentations = D * 4 * 2  # D depth shifts, 4 rotations, 2 flip states
 
     # Use a list to collect all transformed versions of the batch
     all_augmented_inputs = []
 
     # Loop through all possible depth shifts
     for shift in range(D):
-        shifted_batch = torch.roll(batch_inputs, shifts=shift, dims=4)
+        # roll along the depth axis (index 2)
+        shifted_batch = torch.roll(batch_inputs, shifts=shift, dims=2)
         for k in range(4):  # 0, 1, 2, or 3 rotations
-            rotated_batch = torch.rot90(shifted_batch, k, dims=[2, 3])
-            # Add the unflipped and flipped version
+            # rotate in H-W plane (indices 3 and 4)
+            rotated_batch = torch.rot90(shifted_batch, k, dims=[3, 4])
+            # Add the unflipped and flipped version (flip along W axis index 4)
             all_augmented_inputs.append(rotated_batch)
-            flipped_batch = torch.flip(rotated_batch, dims=[3])
+            flipped_batch = torch.flip(rotated_batch, dims=[4])
             all_augmented_inputs.append(flipped_batch)
 
-    # Concatenate all augmented batches
+    # Concatenate all augmented batches along the batch dimension
     augmented_inputs = torch.cat(all_augmented_inputs, dim=0)
 
-    # The target is the same for all augmentations of a given sample.
+    # The target is the same for all augmentations of a given sample
     augmented_targets = batch_targets.repeat(num_augmentations, 1)
 
     return augmented_inputs, augmented_targets

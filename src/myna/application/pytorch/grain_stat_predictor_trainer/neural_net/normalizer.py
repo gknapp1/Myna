@@ -117,6 +117,8 @@ class DatasetNormalizer:
             self.input_log_stds = self._nanstd(
                 clipped_log_data_in, dim=(0, 2, 3, 4), keepdim=True
             )
+            # Avoid zero stds
+            self.input_log_stds = torch.clamp(self.input_log_stds, min=1e-12)
 
         if self.input_linear_channels:
             # Get linear inputs
@@ -134,6 +136,7 @@ class DatasetNormalizer:
             self.input_linear_stds = self._nanstd(
                 clipped_linear_data_in, dim=(0, 2, 3, 4), keepdim=True
             )
+            self.input_linear_stds = torch.clamp(self.input_linear_stds, min=1e-12)
 
         # --- Fit Output Parameters ---
         if self.output_log_channels:
@@ -153,13 +156,13 @@ class DatasetNormalizer:
             self.output_log_stds = self._nanstd(
                 clipped_log_data_out, dim=(0,), keepdim=True
             )
+            self.output_log_stds = torch.clamp(self.output_log_stds, min=1e-12)
 
         if self.output_linear_channels:
-            # Get log outputs and "log" them
+            # Linear outputs: do NOT take a log; compute stats directly
             linear_data_out = train_outputs[:, self.output_linear_channels]
-            linear_data_out = torch.log(log_data_out)
 
-            # Clip outliers based on the entire distribution of log-scaled data
+            # Clip outliers based on the entire distribution of linear-scaled data
             q_low = torch.nanquantile(linear_data_out, self.quantile_clip)
             q_high = torch.nanquantile(linear_data_out, 1.0 - self.quantile_clip)
             clipped_linear_data_out = torch.clamp(linear_data_out, q_low, q_high)
@@ -171,6 +174,7 @@ class DatasetNormalizer:
             self.output_linear_stds = self._nanstd(
                 clipped_linear_data_out, dim=(0,), keepdim=True
             )
+            self.output_linear_stds = torch.clamp(self.output_linear_stds, min=1e-12)
 
         self.isFit = True
         print("Normalizer fit to training data.")
@@ -206,7 +210,8 @@ class DatasetNormalizer:
         # Standardize linear
         if self.output_linear_channels:
             linear_part_out = norm_outputs[:, self.output_linear_channels]
-            norm_inputs[:, self.input_linear_channels] = (
+            # Write normalized outputs into norm_outputs at the selected indices
+            norm_outputs[:, self.output_linear_channels] = (
                 linear_part_out - self.output_linear_means
             ) / self.output_linear_stds
 
