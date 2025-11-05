@@ -1,8 +1,11 @@
 # Base imports
+import glob
+import zipfile
+import fnmatch
 from pathlib import Path
+from typing import NamedTuple
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 
@@ -11,6 +14,21 @@ from .construct_training_dataset import make_dataset
 from .neural_net.architecture import Periodic3DCNN
 from .neural_net.trainer import train_model
 from .neural_net.normalizer import DatasetNormalizer
+
+
+class ArchiveFileDescriptor(NamedTuple):
+    """Describes a file that is potentially located inside of an archive. The
+    full path of the file is described as the concatenation of archive + path"""
+
+    archive: str | None
+    path: str
+
+
+class TrainingDataPair(NamedTuple):
+    """Describes a pair of input data and output data for training a model"""
+
+    inputs: list[ArchiveFileDescriptor]
+    outputs: list[ArchiveFileDescriptor]
 
 
 class GrainStatPredictorTrainerApp(MynaApp):
@@ -49,6 +67,24 @@ class GrainStatPredictorTrainerApp(MynaApp):
             default=None,
             type=str,
             help="Path to directory containing training data",
+        )
+        self.parser.add_argument(
+            "--case-dir-pattern",
+            default="./*/",
+            type=str,
+            help="Pattern to match for finding case directories",
+        )
+        self.parser.add_argument(
+            "--case-input-pattern",
+            default="surfaces_thermal_input_vectors.csv",
+            type=str,
+            help="Pattern to match for finding inputs within each case directory",
+        )
+        self.parser.add_argument(
+            "--case-output-pattern",
+            default="grain_analysis.csv",
+            type=str,
+            help="Pattern to match for finding outputs within each case directory",
         )
         self.parser.add_argument(
             "--test-train-split",
@@ -112,10 +148,33 @@ class GrainStatPredictorTrainerApp(MynaApp):
 
         # Make or get pytorch dataset
         # "~/mnt/savitar/ConceptLaserM2-ORNL1/2024/01/2024-01-26 M2_AMMT_DOE_10/Myna/cases_ammt_doe_10"
+
         base_directory = Path(self.args.training_data_dir.strip("'\"")).expanduser()
-        inputs_tensor, outputs_tensor = make_dataset(
-            base_directory, dataset_path=Path(self.dataset_file).expanduser()
-        )
+        dataset_path = Path(self.dataset_file).expanduser()
+
+        if dataset_path.exists():
+            # Load and return existing data
+            print(f"- Loading dataset from {dataset_path}")
+            data_dict = torch.load(dataset_path)
+            inputs_tensor = data_dict["inputs"]
+            outputs_tensor = data_dict["outputs"]
+        else:
+            # Find data pairs matching the specified patterns (one pair per case)
+            data_pairs = self.find_data_pairs(
+                base_directory,
+                self.args.case_dir_pattern,
+                self.args.case_input_pattern,
+                self.args.case_output_pattern,
+            )
+            print(f"- Found {len(data_pairs)} training data pairs.")
+
+            # TODO: Assemble dataset from the data pairs
+            # - Need to extract files from zip to disk or to memory
+            # - Might need to convert 3DThesis data to the expected format
+            print("- Assembling dataset")
+            inputs_tensor, outputs_tensor = make_dataset(
+                data_pairs, dataset_path=dataset_path
+            )
 
         # Normalize data
         normalizer = DatasetNormalizer(
@@ -136,9 +195,10 @@ class GrainStatPredictorTrainerApp(MynaApp):
         torch.save(normalizer, self.data_file_normalizer)
 
         # Create the full dataset and then split dataset into training
-        # and validation sets
+        # and validation sets. Save tensors on CPU to avoid CUDA-device
+        # specific pickles which may not load if CUDA is unavailable.
         full_dataset = TensorDataset(
-            norm_inputs_tensor.to(self.device), norm_outputs_tensor.to(self.device)
+            norm_inputs_tensor.cpu(), norm_outputs_tensor.cpu()
         )
         train_split = self.args.test_train_split
         train_size = int(train_split * len(full_dataset))
@@ -220,7 +280,16 @@ class GrainStatPredictorTrainerApp(MynaApp):
             preds_real_all = np.array([])
             preds_low_all = np.array([])
             preds_high_all = np.array([])
+            # Use lists to collect per-batch arrays, then stack once to avoid
+            # repeated reshapes/vstack edge-cases for the first batch.
+            targets_list = []
+            preds_real_list = []
+            preds_low_list = []
+            preds_high_list = []
             for batch_inputs, batch_targets in val_loader:
+                # Move inputs to device for model inference
+                batch_inputs = batch_inputs.to(self.device)
+
                 # Run the model
                 mu, log_var, _ = model_silu(batch_inputs)
 
@@ -232,50 +301,33 @@ class GrainStatPredictorTrainerApp(MynaApp):
                     mu_cpu - std_cpu
                 ).numpy()
                 preds_real = normalizer.inverse_transform_outputs(mu_cpu).numpy()
-                # preds_real = normalizer.inverse_transform_outputs(z_sample.cpu()).numpy()
                 preds_high = normalizer.inverse_transform_outputs(
                     mu_cpu + std_cpu
                 ).numpy()
 
-                # Get targets
-                targets_norm = batch_targets.cpu()
+                # Get targets (already CPU from DataLoader since datasets are saved on CPU)
+                targets_norm = batch_targets
                 targets_real = normalizer.inverse_transform_outputs(
                     targets_norm
                 ).numpy()
 
-                # Append for all batches
-                targets_real_all = np.vstack(
-                    (
-                        targets_real_all.reshape(
-                            targets_real_all.shape[0], targets_real.shape[1]
-                        ),
-                        targets_real,
-                    )
-                )
-                preds_real_all = np.vstack(
-                    (
-                        preds_real_all.reshape(
-                            preds_real_all.shape[0], preds_real.shape[1]
-                        ),
-                        preds_real,
-                    )
-                )
-                preds_low_all = np.vstack(
-                    (
-                        preds_low_all.reshape(
-                            preds_low_all.shape[0], preds_low.shape[1]
-                        ),
-                        preds_low,
-                    )
-                )
-                preds_high_all = np.vstack(
-                    (
-                        preds_high_all.reshape(
-                            preds_high_all.shape[0], preds_high.shape[1]
-                        ),
-                        preds_high,
-                    )
-                )
+                # Append batch results
+                targets_list.append(targets_real)
+                preds_real_list.append(preds_real)
+                preds_low_list.append(preds_low)
+                preds_high_list.append(preds_high)
+
+            # Stack lists into arrays (handle empty case gracefully)
+            if len(targets_list) > 0:
+                targets_real_all = np.vstack(targets_list)
+                preds_real_all = np.vstack(preds_real_list)
+                preds_low_all = np.vstack(preds_low_list)
+                preds_high_all = np.vstack(preds_high_list)
+            else:
+                targets_real_all = np.empty((0, 3))
+                preds_real_all = np.empty((0, 3))
+                preds_low_all = np.empty((0, 3))
+                preds_high_all = np.empty((0, 3))
 
             # Plot validation data versus predicted values
             output_names = [
@@ -326,3 +378,66 @@ class GrainStatPredictorTrainerApp(MynaApp):
         plt.plot(test_loss, label="Loss (Test)")
         plt.legend()
         plt.savefig("loss.png")
+
+    def get_matching_filepaths(
+        self, base_path: str | Path, pattern: str
+    ) -> list[ArchiveFileDescriptor]:
+        """Get matching filepaths within the base paths, supporting searching for file paths
+        within .zip archives.
+        """
+        path_parts = (Path(base_path) / Path(pattern)).parts
+        is_zip = [True if ".zip" in x else False for x in path_parts]
+        matches = []
+        if any(is_zip):
+            zip_dir_pattern = str(Path(*path_parts[: is_zip.index(True) + 1]))
+            file_pattern = str(Path(*path_parts[is_zip.index(True) + 1 :]))
+            zip_dirs = sorted(glob.glob(str(zip_dir_pattern)))
+            for zip_dir in zip_dirs:
+                print(f"- {zip_dir=}")
+                with zipfile.ZipFile(zip_dir, mode="r") as zf:
+                    # Get list of zipinfo objects that match the pattern in the .zip directory
+                    zipinfos = [
+                        x
+                        for x in zf.infolist()
+                        if fnmatch.fnmatch(x.filename, file_pattern) and not x.is_dir()
+                    ]
+
+                    # Record each file descriptor in the archive
+                    for zi in zipinfos:
+                        matches.append(ArchiveFileDescriptor(zip_dir, zi.filename))
+        else:
+            matches.extend(
+                [
+                    ArchiveFileDescriptor(None, x)
+                    for x in sorted(glob.glob(str(Path(base_path) / Path(pattern))))
+                ]
+            )
+        return matches
+
+    def find_data_pairs(
+        self,
+        parent_directory: str | Path,
+        case_dir_pattern: str,
+        case_input_pattern: str,
+        case_output_pattern: str,
+    ) -> list[tuple[Path, Path]]:
+        """
+        Recursively finds pairs of (zip_file, csv_file) within a parent directory.
+
+        A valid pair is found in a directory that contains:
+        1. A file named exactly 'grain_analysis.csv'.
+        2. Exactly one file ending with '.zip'.
+
+        Args:
+            parent_directory: The top-level directory to start the search from.
+
+        Returns:
+            A list of tuples, where each tuple is (path_to_zip, path_to_csv).
+        """
+        data_pairs = []
+        cases = self.get_matching_filepaths(parent_directory, case_dir_pattern)
+        for case in cases:
+            input_files = self.get_matching_filepaths(case.path, case_input_pattern)
+            output_files = self.get_matching_filepaths(case.path, case_output_pattern)
+            data_pairs.append(TrainingDataPair(input_files, output_files))
+        return data_pairs
