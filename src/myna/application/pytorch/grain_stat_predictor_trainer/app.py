@@ -1,16 +1,18 @@
 # Base imports
+import os
+import shutil
 import glob
 import zipfile
 import fnmatch
 from pathlib import Path
 from typing import NamedTuple
 import numpy as np
+import polars as pl
 import torch
 from torch.utils.data import TensorDataset, DataLoader, random_split
 import matplotlib.pyplot as plt
 
 from myna.core.app import MynaApp
-from .construct_training_dataset import make_dataset
 from .neural_net.architecture import Periodic3DCNN
 from .neural_net.trainer import train_model
 from .neural_net.normalizer import DatasetNormalizer
@@ -31,6 +33,15 @@ class TrainingDataPair(NamedTuple):
     outputs: list[ArchiveFileDescriptor]
 
 
+def load_archive_file_to_df(afd: ArchiveFileDescriptor) -> pl.DataFrame:
+    if afd.archive is None:
+        return pl.read_csv(afd.path)
+    else:
+        with zipfile.ZipFile(afd.archive) as zf:
+            with zf.open(afd.path) as f:
+                return pl.read_csv(f)
+
+
 class GrainStatPredictorTrainerApp(MynaApp):
     """Application for training a neural network to predict grain statistics"""
 
@@ -38,12 +49,36 @@ class GrainStatPredictorTrainerApp(MynaApp):
         super().__init__(name)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dataset_file = "dataset.pt"
-        self.data_file_training = "data_training.pt"
-        self.data_file_validation = "data_validation.pt"
+        self.data_file_normalized_training = "data_normalized_training.pt"
         self.data_file_normalizer = "normalizer.pt"
         self.model_arg_dict = "model_arg_dict.pt"
         self.trained_model_state_dict = "trained_model_state_dict.pt"
         self.trained_model_loss_dict = "trained_model_loss_dict.pt"
+        self.input_surface_top_suffix = "_top"
+        self.input_surface_bot_suffix = "_bot"
+        self.expected_thesis_data_cols = ["x", "y", "G", "V", "depth", "numMelt"]
+        self.expected_surface_data_cols = [
+            "x",
+            "y",
+            f"G{self.input_surface_top_suffix}",
+            f"V{self.input_surface_top_suffix}",
+            "depth",
+            f"numMelt{self.input_surface_top_suffix}",
+            f"G{self.input_surface_bot_suffix}",
+            f"V{self.input_surface_bot_suffix}",
+            f"numMelt{self.input_surface_bot_suffix}",
+        ]
+        self.expect_output_cols = [
+            "Volume (m^3) [mean]",
+            "Equivalent Diameter (m) [mean]",
+            "Major Axis Length (m) [mean]",
+            "Minor Axis Length (m) [mean]",
+            "Volume (m^3) [std]",
+            "Equivalent Diameter (m) [std]",
+            "Major Axis Length (m) [std]",
+            "Minor Axis Length (m) [std]",
+        ]
+        self.layers_per_input = 4
 
     def format_output_dict(self):
         """Format the output dictionary for the Myna step"""
@@ -86,13 +121,6 @@ class GrainStatPredictorTrainerApp(MynaApp):
             type=str,
             help="Pattern to match for finding outputs within each case directory",
         )
-        self.parser.add_argument(
-            "--test-train-split",
-            default=0.8,
-            type=float,
-            help="Fractional split of dataset for testing and training,"
-            " for example, 0.8 = 80/20 split",
-        )
         self.args, _ = self.parser.parse_known_args()
         self.mpiargs_to_current()
 
@@ -103,6 +131,13 @@ class GrainStatPredictorTrainerApp(MynaApp):
     def parse_execute_arguments(self):
         """Check for arguments relevant to the configure step and update app settings"""
         # Parse app-specific arguments
+        self.parser.add_argument(
+            "--test-train-split",
+            default=0.8,
+            type=float,
+            help="Fractional split of dataset for testing and training,"
+            " for example, 0.8 = 80/20 split",
+        )
         self.parser.add_argument(
             "--batch-size",
             default=16,
@@ -168,11 +203,9 @@ class GrainStatPredictorTrainerApp(MynaApp):
             )
             print(f"- Found {len(data_pairs)} training data pairs.")
 
-            # TODO: Assemble dataset from the data pairs
-            # - Need to extract files from zip to disk or to memory
-            # - Might need to convert 3DThesis data to the expected format
+            # Assemble dataset from data pairs
             print("- Assembling dataset")
-            inputs_tensor, outputs_tensor = make_dataset(
+            inputs_tensor, outputs_tensor = self.make_dataset(
                 data_pairs, dataset_path=dataset_path
             )
 
@@ -194,20 +227,12 @@ class GrainStatPredictorTrainerApp(MynaApp):
         # Save the normalizer to a file
         torch.save(normalizer, self.data_file_normalizer)
 
-        # Create the full dataset and then split dataset into training
-        # and validation sets. Save tensors on CPU to avoid CUDA-device
+        # Create the full dataset. Save tensors on CPU to avoid CUDA-device
         # specific pickles which may not load if CUDA is unavailable.
         full_dataset = TensorDataset(
             norm_inputs_tensor.cpu(), norm_outputs_tensor.cpu()
         )
-        train_split = self.args.test_train_split
-        train_size = int(train_split * len(full_dataset))
-        val_size = len(full_dataset) - train_size
-        train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
-
-        # Save training and validation sets
-        torch.save(train_dataset, self.data_file_training)
-        torch.save(val_dataset, self.data_file_validation)
+        torch.save(full_dataset, self.data_file_normalized_training)
 
     def execute(self):
         "Train the model"
@@ -225,8 +250,13 @@ class GrainStatPredictorTrainerApp(MynaApp):
         ):
 
             # Load the training and validation datasets and the normalizer
-            train_dataset = torch.load(self.data_file_training)
-            val_dataset = torch.load(self.data_file_validation)
+            full_dataset = torch.load(self.data_file_normalized_training)
+            train_split = self.args.test_train_split
+            train_size = int(train_split * len(full_dataset))
+            val_size = len(full_dataset) - train_size
+            train_dataset, val_dataset = random_split(
+                full_dataset, [train_size, val_size]
+            )
             normalizer = torch.load(self.data_file_normalizer)
 
         # Create DataLoaders
@@ -239,8 +269,8 @@ class GrainStatPredictorTrainerApp(MynaApp):
 
         # Make the neural network
         model_args = {
-            "in_channels": 7,
-            "out_features": 3,
+            "in_channels": len(self.expected_surface_data_cols) - 2,
+            "out_features": len(self.expect_output_cols),
             "activation_fn": torch.nn.SiLU,
         }
         torch.save(model_args, self.model_arg_dict)
@@ -330,13 +360,12 @@ class GrainStatPredictorTrainerApp(MynaApp):
                 preds_high_all = np.empty((0, 3))
 
             # Plot validation data versus predicted values
-            output_names = [
-                "Volume (m$^3$)",
-                "Major Axis Length (m)",
-                "Minor Axis Length (m)",
-            ]
             fig, axes = plt.subplots(
-                1, len(output_names), figsize=(16, 5), sharex=False, sharey=False
+                1,
+                len(self.expect_output_cols),
+                figsize=(16, 5),
+                sharex=False,
+                sharey=False,
             )
             for j, ax in enumerate(axes):
                 # Extract true values and predicted values
@@ -363,7 +392,7 @@ class GrainStatPredictorTrainerApp(MynaApp):
                 min_val = min(y_true.min(), y_pred.min())
                 max_val = max(y_true.max(), y_pred.max())
                 ax.plot([min_val, max_val], [min_val, max_val], "r--")
-                ax.set_title(output_names[j])
+                ax.set_title(self.expect_output_cols[j])
                 ax.set_xlabel("Truth")
                 ax.set_ylabel("Predicted")
                 ax.set_aspect(1)
@@ -382,8 +411,8 @@ class GrainStatPredictorTrainerApp(MynaApp):
     def get_matching_filepaths(
         self, base_path: str | Path, pattern: str
     ) -> list[ArchiveFileDescriptor]:
-        """Get matching filepaths within the base paths, supporting searching for file paths
-        within .zip archives.
+        """Get matching filepaths within the base paths, supporting searching for
+        file paths within .zip archives.
         """
         path_parts = (Path(base_path) / Path(pattern)).parts
         is_zip = [True if ".zip" in x else False for x in path_parts]
@@ -420,7 +449,7 @@ class GrainStatPredictorTrainerApp(MynaApp):
         case_dir_pattern: str,
         case_input_pattern: str,
         case_output_pattern: str,
-    ) -> list[tuple[Path, Path]]:
+    ) -> list[TrainingDataPair]:
         """
         Recursively finds pairs of (zip_file, csv_file) within a parent directory.
 
@@ -441,3 +470,252 @@ class GrainStatPredictorTrainerApp(MynaApp):
             output_files = self.get_matching_filepaths(case.path, case_output_pattern)
             data_pairs.append(TrainingDataPair(input_files, output_files))
         return data_pairs
+
+    def make_dataset(
+        self, data_pairs: list[TrainingDataPair], dataset_path: Path = None
+    ):
+        """Create dataset"""
+
+        # Generate new data and save it
+        print("- Generating new dataset from source folders...")
+
+        # Loop over data pairs and extract data
+        all_inputs, all_outputs = [], []
+        for data_pair in data_pairs:
+            # Make input and output data
+            print("- Data pair:")
+            print("  - Inputs:")
+            for fp in data_pair.inputs:
+                print(f"    - {fp}")
+            print("  - Outputs:")
+            for fp in data_pair.outputs:
+                print(f"    - {fp}")
+            if not self.valid_data_pair(data_pair):
+                continue
+            input_data = self.input_data_to_array(data_pair.inputs)
+            output_data = self.output_data_to_array(data_pair.outputs)
+            # Append the numpy arrays to our lists
+            all_inputs.append(input_data)
+            all_outputs.append(output_data)
+
+        # Stack arrays
+        # - Input shape: (N, C, D, H, W)
+        final_inputs_np = np.stack(all_inputs, axis=0)
+        final_outputs_np = np.stack(all_outputs, axis=0)
+
+        # Convert the final numpy arrays into PyTorch tensors
+        inputs_tensor = torch.from_numpy(final_inputs_np).float()
+        outputs_tensor = torch.from_numpy(final_outputs_np).float()
+
+        # If filepath isn't none, try saving
+        if dataset_path is not None:
+            print(f"- Saving dataset to {dataset_path}...")
+            # Save the tensors to a single file using a dictionary
+            dataset_dict = {"inputs": inputs_tensor, "outputs": outputs_tensor}
+            torch.save(dataset_dict, dataset_path)
+
+        return inputs_tensor, outputs_tensor
+
+    def valid_data_pair(self, data_pair: TrainingDataPair) -> bool:
+        """Boolean test for if data_pair is valid"""
+        
+        if len(data_pair.inputs) != self.layers_per_input:
+            print(f"{data_pair.inputs=}")
+            print(f"Expected {self.layers_per_input} input files for data pair, not {len(data_pair.inputs)}")
+            return False
+        if len(data_pair.outputs) != 1:
+            print(f"{data_pair.outputs=}")
+            print(f"Expected 1 output file for data pair, not {len(data_pair.outputs)}")
+            return False
+        return True
+
+    def input_data_to_array(self, files: list[ArchiveFileDescriptor]) -> np.ndarray:
+        """Generate input data for the neural network from a single data pair input list"""
+
+        # Extract data from files and pass to formatting functions
+        dfs = []
+        filenames = []
+        input_data = None
+        for i, afd in enumerate(files):
+            # Validate that there are the correct number of files
+            # TODO: The number of layer files should probably be an input variable
+            if len(files) != 4:
+                continue
+
+            filenames.append(afd.path)
+            dfs.append(load_archive_file_to_df(afd))
+
+        # Sort by filename, assuming filename corresponds with layer order
+        dfs = [a for _, a in sorted(zip(filenames, dfs), key=lambda k: k[0])]
+        filenames = sorted(filenames)
+
+        # Determine if CSV is 3D solidification data or the surface extraction
+        data_arrays = []
+        for df, fn in zip(dfs, filenames):
+            # Handle converting 3DThesis data to surface data
+            if all([x in df.columns for x in self.expected_thesis_data_cols]):
+                data_arrays.append(self.extract_surface(df.select(self.expected_thesis_data_cols)))
+            # Handle data that is already in the surface format
+            elif all([x in df.columns for x in self.expected_surface_data_cols]):
+                data_arrays.append(df.select(self.expected_surface_data_cols))
+            # Handle data that is in the incorrect format
+            else:
+                print(f"{fn=}")
+                print(f"{df.columns=}")
+                print(f"{self.expected_surface_data_cols=}")
+                print([x in df.columns for x in self.expected_surface_data_cols])
+                error_msg = f"{fn} is not in the expected format for input data"
+                raise LookupError(error_msg)
+
+        # Stack the arrays
+        input_data = None
+        for i, data in enumerate(data_arrays):
+            arr_2d = self.create_grid_from_sparse_df(data)
+            # If no data, set the shape based on the first array
+            # - Assumes that all data will have same shape
+            if input_data is None:
+                input_data = np.empty(shape=arr_2d.shape + (len(data_arrays),))
+            # Set data of array (C, H, W, D)
+            input_data[:, :, :, i] = arr_2d
+
+        # Input data shape needs to be transposed (C, H, W, D) -> (C, D, H, W)
+        # - C: Channel
+        # - D: Depth, e.g., layers
+        # - H: Y-dimension
+        # - W: X-dimension
+        input_data = np.transpose(input_data, [0, 3, 1, 2])
+        return input_data
+
+    def output_data_to_array(self, files: list[ArchiveFileDescriptor]) -> np.ndarray:
+        """Convert the output data to an array"""
+        # There should only be one datafile
+        if len(files) != 1:
+            error_msg = f"Expected 1 output datafile, not {len(files)}"
+            raise ValueError(error_msg)
+
+        # Load the datafile
+        afd = files[0]
+        df = load_archive_file_to_df(afd)
+
+        # Assume a single-row table with table columns forming the output
+        return df.select(self.expect_output_cols).to_numpy().flatten()
+
+    def create_grid_from_sparse_df(
+        self,
+        df: pl.DataFrame,
+        placeholder_value: float = np.nan,
+        bounds: tuple[float, float, float, float] = None,
+    ) -> np.ndarray:
+        """Creates a grid from a polars DataFrame with sparse grid points on a regular grid
+        
+        The returned grid has a shape (C, H, W)"""
+
+        data = df.to_numpy()
+
+        # Define columns for x and y and read data
+        x_col, y_col = (0, 1)
+        x_coords_float = data[:, x_col]
+        y_coords_float = data[:, y_col]
+
+        # Find unique sorted coordinates to establish the grid axes
+        unique_x = np.unique(x_coords_float)
+        unique_y = np.unique(y_coords_float)
+
+        # Determine grid parameters
+        if bounds is None:
+            min_x = unique_x[0]
+            min_y = unique_y[0]
+            max_x = unique_x[-1]
+            max_y = unique_y[-1]
+        else:
+            min_x, min_y, max_x, max_y = bounds
+        res_x = unique_x[1] - unique_x[0]
+        res_y = unique_y[1] - unique_y[0]
+
+        # # Grid dimensions are simply the number of unique points along each axis
+        # width = len(unique_x)
+        # height = len(unique_y)
+
+        # Calculate grid dimensions based on bounds and resolution
+        width = int(np.round((max_x - min_x) / res_x)) + 1
+        height = int(np.round((max_y - min_y) / res_y)) + 1
+
+        # Convert float coordinates to integer grid indices
+        x_indices = np.rint((x_coords_float - min_x) / res_x).astype(int)
+        y_indices = np.rint((y_coords_float - min_y) / res_y).astype(int)
+
+        # Separate channel data and populate the grid
+        num_total_cols = data.shape[1]
+        all_col_indices = np.arange(num_total_cols)
+        channel_col_indices = np.delete(all_col_indices, [x_col, y_col])
+        channel_data = data[:, channel_col_indices]
+        num_channels = channel_data.shape[1]
+
+        # Report any nan values in channel data
+        # TODO: Make sure that NaNs are handled in the normalizer and training in
+        #       a reasonable way
+        num_nans_channel = np.isnan(channel_data).sum()
+        if num_nans_channel > 0:
+            print(f"Warning: Channel data contains {num_nans_channel} NaN values.")
+
+        # Create the dense grid, initialized with the placeholder value
+        grid = np.full(
+            (num_channels, height, width), placeholder_value, dtype=np.float32
+        )
+
+        # Populate the grid using the calculated integer indices
+        grid[:, y_indices, x_indices] = channel_data.T
+
+        # Report any nan values in grid data
+        num_nans = np.isnan(grid).sum()
+        if num_nans > 0:
+            print(
+                f"Warning: Created grid from data that contains {num_nans} NaN values."
+            )
+
+        return grid
+
+    def extract_surface(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Extracts the top and bottom surfaces from a 3DThesis output solidification data
+        CSV file and saves them into a new CSV file that is compatible with ML input vector.
+
+        Args:
+            thesis_datafile: Path to the input 3DThesis solidification CSV file.
+            top_suffix: Suffix to append to top surface columns.
+            bot_suffix: Suffix to append to bottom surface columns.
+
+        Returns:
+            tuple:
+            - Path to the output CSV file with extracted surfaces.
+            - A tuple of (min_x, min_y, max_x, max_y) bounds of the data."""
+
+        # Define columns that use _top and _bot suffix
+        # (assume all colunmns with _top have corresponding _bot)
+        both_cols = [
+            x
+            for x in self.expected_surface_data_cols
+            if x.endswith(self.input_surface_top_suffix)
+        ]
+
+        # Make top dataframe and add suffix
+        top_df = df.filter(pl.col("z") == pl.col("z").max())
+        top_df = top_df.select(self.expected_thesis_data_cols).with_columns(
+            [pl.col(c).alias(f"{c}{self.input_surface_top_suffix}") for c in both_cols]
+        )
+
+        # Extract the bottom surface
+        bottom_df = (
+            df.group_by(["x", "y"])
+            .agg(pl.col("z").arg_min().alias("idx_bottom"))
+            .join(df.with_row_index(), left_on="idx_bottom", right_on="index")
+            .select(self.expected_thesis_data_cols)
+        )
+        bottom_df = bottom_df.select(self.expected_thesis_data_cols).with_columns(
+            [pl.col(c).alias(f"{c}{self.input_surface_bot_suffix}") for c in both_cols]
+        )
+
+        # Merge top and bottom dataframes
+        merged_df = top_df.join(bottom_df, on=["x", "y"], how="inner")
+
+        # Return only expected columns
+        return merged_df.select(self.expected_surface_data_cols)

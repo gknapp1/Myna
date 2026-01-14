@@ -30,14 +30,15 @@ class GrainStatPredictorApp(MynaApp):
             "--trained-model-dir",
             default=None,
             type=str,
-            help="Directory containing to the trained model output"
+            help="Directory containing the trained model output"
             "from grain_stat_predictor_trainer",
         )
+        # TODO: Remove this field, as it should be derived from the Myna input file
         self.parser.add_argument(
             "--thermal-data-dir",
             default=None,
             type=str,
-            help="Directory containing to the thermal data files for prediction",
+            help="Directory containing the thermal data files for prediction",
         )
         self.parser.add_argument(
             "--layer-start",
@@ -86,7 +87,9 @@ class GrainStatPredictorApp(MynaApp):
             ):
                 # Load the model args, state, and normalizer
                 model_arg_dict = torch.load(trainer_app.model_arg_dict)
-                trained_model_state_dict = torch.load(trainer_app.trained_model_state_dict)
+                trained_model_state_dict = torch.load(
+                    trainer_app.trained_model_state_dict
+                )
                 normalizer = torch.load(trainer_app.data_file_normalizer)
 
                 # Initialize the model and load the state dict
@@ -96,8 +99,19 @@ class GrainStatPredictorApp(MynaApp):
 
         # Get input data, filtering data files based on specified layers
         print(f"- Getting input data from {self.args.thermal_data_dir}")
+        # TODO: These files should be passed from a previous Myna step that outputs solidification data
+        #    e.g. from 3DThesis, assumed to have the columns:
+        #       - x: location in meters
+        #       - y: location in meters
+        #       - z: location in meters
+        #       - G: temperature gradient during solidification in K/m
+        #       - V: solidification velocity in m/s
+        #       - depth: depth of the melt pool in meters
+        #       - numMelt: number of times the material has melted
         csv_files = sorted(
-            glob.glob(f"{self.args.thermal_data_dir.strip("\'\"")}/*/3dthesis_full/Data/*.Final.csv")
+            glob.glob(
+                f"{self.args.thermal_data_dir.strip("\'\"")}/*/3dthesis_full/Data/*.Final.csv"
+            )
         )
         for csv_file in csv_files:
             print("  - Found CSV file:", csv_file)
@@ -107,8 +121,12 @@ class GrainStatPredictorApp(MynaApp):
             for layer_id, path in zip(layer_ids, csv_files)
             if self.args.layer_start <= layer_id <= self.args.layer_stop
         ]
-        input_data_array = make_input_data_from_thesis_csv(filtered_files, compute_bounds=True)
-        input_data_array = np.array([input_data_array])  # Add expected batch dimension, since currently only expecting 1 dataset (i.e. set of 4 files)
+        input_data_array = make_input_data_from_thesis_csv(
+            filtered_files, compute_bounds=True
+        )
+        input_data_array = np.array(
+            [input_data_array]
+        )  # Add expected batch dimension, since currently only expecting 1 dataset (i.e. set of 4 files)
         input_tensor = torch.from_numpy(input_data_array).float()
 
         # Normalize input data, temporarily setting output channels to empty as they
@@ -119,7 +137,9 @@ class GrainStatPredictorApp(MynaApp):
         normalizer.output_log_channels = []
         print(f"- {normalizer.input_linear_channels=}")
         print(f"- {normalizer.input_log_channels=}")
-        norm_inputs_tensor, _ = normalizer.transform(inputs=input_tensor, outputs=input_tensor)
+        norm_inputs_tensor, _ = normalizer.transform(
+            inputs=input_tensor, outputs=input_tensor
+        )
 
         # Remove batch dimension
         norm_inputs_tensor = norm_inputs_tensor[0]
@@ -131,8 +151,8 @@ class GrainStatPredictorApp(MynaApp):
         # Save image of input tensor
         self.plot_image(
             norm_inputs_tensor.permute(1, 2, 0, 3).numpy()[:, :, :, 0],
-            ["G_top","V_top","depth","numMelt_top","G_bot","V_bot","numMelt_bot"],
-            "input_tensor.png"
+            ["G_top", "V_top", "depth", "numMelt_top", "G_bot", "V_bot", "numMelt_bot"],
+            "input_tensor.png",
         )
 
         # Extract patches from the input images
@@ -163,14 +183,16 @@ class GrainStatPredictorApp(MynaApp):
 
                 # Determine if patch has too many nans and mask if so
                 for batch_input in batch_inputs:
-                    if torch.isnan(batch_input).sum() > (0.25 * PATCH_SIZE * PATCH_SIZE):
+                    if torch.isnan(batch_input).sum() > (
+                        0.25 * PATCH_SIZE * PATCH_SIZE
+                    ):
                         mask.append(False)
                     else:
                         mask.append(True)
 
                 # Get model prediction
                 mu, log_var, _ = model_silu(batch_inputs)
-                
+
                 # Convert both prediction and target back to their original "real" scale
                 mu_cpu, std_cpu = mu.cpu(), torch.exp(0.5 * log_var.cpu())
 
@@ -195,7 +217,9 @@ class GrainStatPredictorApp(MynaApp):
                     pred_img[i, j, :] = preds_real_all[patch_idx]
                     # Mask out invalid patches
                     if not mask[patch_idx]:
-                        pred_img[i, j, :] = np.ones_like(preds_real_all[patch_idx]) * np.nan
+                        pred_img[i, j, :] = (
+                            np.ones_like(preds_real_all[patch_idx]) * np.nan
+                        )
             output_names = [
                 "Volume (m$^3$)",
                 "Major Axis Length (m)",
@@ -206,7 +230,11 @@ class GrainStatPredictorApp(MynaApp):
     def plot_image(self, img: np.ndarray, var_names: list[str], export_file: str):
         """Plot the image (ni, nj, nvars) with one subplot per variable"""
         fig, axs = plt.subplots(
-            1, len(var_names), figsize=(5*len(var_names), 5), sharex=False, sharey=False
+            1,
+            len(var_names),
+            figsize=(5 * len(var_names), 5),
+            sharex=False,
+            sharey=False,
         )
         for j, ax in enumerate(axs):
             # Plot the image

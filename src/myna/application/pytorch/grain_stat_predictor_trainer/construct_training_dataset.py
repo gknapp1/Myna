@@ -1,15 +1,74 @@
 import zipfile
+import fnmatch
 import os
+import io
+import glob
 import tempfile
 import numpy as np
 import polars as pl
 import shutil
 import torch
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, NamedTuple
 
 
-def find_data_pairs(parent_directory: Path) -> List[Tuple[Path, Path]]:
+class ArchiveFileDescriptor(NamedTuple):
+    """Describes a file that is potentially located inside of an archive. The
+    full path of the file is described as the concatenation of archive + path"""
+
+    archive: str | None
+    path: str
+
+
+class TrainingDataPair(NamedTuple):
+    """Describes a pair of input data and output data for training a model"""
+
+    inputs: list[ArchiveFileDescriptor]
+    outputs: list[ArchiveFileDescriptor]
+
+
+def get_matching_filepaths(
+    base_path: str | Path, pattern: str
+) -> list[ArchiveFileDescriptor]:
+    """Get matching filepaths within the base paths, supporting searching for file paths
+    within .zip archives.
+    """
+    path_parts = (Path(base_path) / Path(pattern)).parts
+    is_zip = [True if ".zip" in x else False for x in path_parts]
+    matches = []
+    if any(is_zip):
+        zip_dir_pattern = str(Path(*path_parts[: is_zip.index(True) + 1]))
+        file_pattern = str(Path(*path_parts[is_zip.index(True) + 1 :]))
+        zip_dirs = sorted(glob.glob(str(zip_dir_pattern)))
+        for zip_dir in zip_dirs:
+            print(f"- {zip_dir=}")
+            with zipfile.ZipFile(zip_dir, mode="r") as zf:
+                # Get list of zipinfo objects that match the pattern in the .zip directory
+                zipinfos = [
+                    x
+                    for x in zf.infolist()
+                    if fnmatch.fnmatch(x.filename, file_pattern) and not x.is_dir()
+                ]
+
+                # Record each file descriptor in the archive
+                for zi in zipinfos:
+                    matches.append(ArchiveFileDescriptor(zip_dir, zi.filename))
+    else:
+        matches.extend(
+            [
+                ArchiveFileDescriptor(None, x)
+                for x in sorted(glob.glob(str(Path(base_path) / Path(pattern))))
+            ]
+        )
+    return matches
+
+
+def find_data_pairs(
+    parent_directory: str | Path,
+    case_dir_pattern: str,
+    case_input_pattern: str,
+    case_output_pattern: str,
+) -> List[Tuple[Path, Path]]:
     """
     Recursively finds pairs of (zip_file, csv_file) within a parent directory.
 
@@ -24,30 +83,18 @@ def find_data_pairs(parent_directory: Path) -> List[Tuple[Path, Path]]:
         A list of tuples, where each tuple is (path_to_zip, path_to_csv).
     """
     data_pairs = []
-
-    # os.walk is the most efficient way to visit every directory
-    print(
-        f"Searching {parent_directory},"
-        f" directory exists = {parent_directory.exists()}"
-    )
-    for root, _, files in os.walk(parent_directory):
-        # Check if our specific CSV file is in the current directory
-        if "grain_analysis.csv" in files:
-            # Find all files ending in .zip in the same directory
-            zip_files = [f for f in files if f.endswith(".zip")]
-
-            # If we find exactly one .zip file, we have a valid pair
-            if len(zip_files) == 1:
-                current_dir = Path(root)
-                zip_path = current_dir / zip_files[0]
-                csv_path = current_dir / "grain_analysis.csv"
-                data_pairs.append((zip_path, csv_path))
-            elif len(zip_files) > 1:
-                print(
-                    f"Warning: Found {len(zip_files)} .zip files in '{root}'. Skipping this directory."
-                )
-            # If len(zip_files) is 0, we do nothing and continue.
-
+    cases = get_matching_filepaths(parent_directory, case_dir_pattern)
+    for case in cases:
+        input_files = get_matching_filepaths(case.path, case_input_pattern)
+        output_files = get_matching_filepaths(case.path, case_output_pattern)
+        data_pairs.append(TrainingDataPair(input_files, output_files))
+    for data_pair in data_pairs:
+        print("Inputs:")
+        for input in data_pair.inputs:
+            print(f"- {input}")
+        print("Outputs:")
+        for output in data_pair.outputs:
+            print(f"- {output}")
     return data_pairs
 
 
@@ -168,7 +215,9 @@ def make_input_data(zip_filepath: Path) -> np.ndarray:
     return input_data
 
 
-def make_input_data_from_surface_csv(matching_csv_files: List[str], compute_bounds=False) -> np.ndarray:
+def make_input_data_from_surface_csv(
+    matching_csv_files: List[str], compute_bounds=False
+) -> np.ndarray:
     """Generate input data for the neural network from a list of csv files"""
     # Compute bounds from files
     min_x, min_y, max_x, max_y = (1e10, 1e10, -1e10, -1e10)
@@ -200,7 +249,10 @@ def make_input_data_from_surface_csv(matching_csv_files: List[str], compute_boun
         input_data[:, :, :, i] = arr_2d
     return input_data
 
-def make_input_data_from_thesis_csv(matching_csv_files: List[str], compute_bounds=False) -> np.ndarray:
+
+def make_input_data_from_thesis_csv(
+    matching_csv_files: List[str], compute_bounds=False
+) -> np.ndarray:
     """Generate input data for the neural network from a list of csv files"""
 
     # Create surface files from thesis files if needed
@@ -228,6 +280,7 @@ def make_input_data_from_thesis_csv(matching_csv_files: List[str], compute_bound
         input_data[:, :, :, i] = arr_2d
     return input_data
 
+
 def make_output_data(csv_filepath: Path) -> np.ndarray:
     # Read csv and load as output
     file_data = np.genfromtxt(
@@ -244,28 +297,20 @@ def make_output_data(csv_filepath: Path) -> np.ndarray:
     return output_data
 
 
-def make_dataset(parent_directory: Path, dataset_path: Path = None):
-
-    # If path exists
-    if dataset_path and dataset_path.exists():
-        # Load and return existing data
-        print(f"Loading dataset from {dataset_path}...")
-        data_dict = torch.load(dataset_path)
-        return data_dict["inputs"], data_dict["outputs"]
+def make_dataset(data_pairs: List[Tuple[Path, Path]], dataset_path: Path = None):
 
     # Generate new data and save it
-    print("Generating new dataset from source folders...")
-
-    # Find folders with a .zip file and "grain_analysis.csv"
-    data_pairs = find_data_pairs(parent_directory=parent_directory)
-    print(f"Found {len(data_pairs)} valid data pairs.")
+    print("- Generating new dataset from source folders...")
 
     # Loop over data pairs and extract data
     all_inputs, all_outputs = [], []
-    for i, (zip_path, csv_path) in enumerate(data_pairs):
+    # Changes:
+    # zip_path -> input_path
+    # csv_path -> output_path
+    for i, (input_path, output_path) in enumerate(data_pairs):
         # Make input and output data
-        input_data = make_input_data(zip_path)
-        output_data = make_output_data(csv_path)
+        input_data = make_input_data(input_path)
+        output_data = make_output_data(output_path)
         # Append the numpy arrays to our lists
         all_inputs.append(input_data)
         all_outputs.append(output_data)
@@ -280,17 +325,20 @@ def make_dataset(parent_directory: Path, dataset_path: Path = None):
 
     # If filepath isn't none, try saving
     if dataset_path is not None:
-        print(f"Saving dataset to {dataset_path}...")
+        print(f"- Saving dataset to {dataset_path}...")
         # Save the tensors to a single file using a dictionary
         dataset_dict = {"inputs": inputs_tensor, "outputs": outputs_tensor}
         torch.save(dataset_dict, dataset_path)
 
     return inputs_tensor, outputs_tensor
 
-def extract_surface(thesis_datafile: Path, top_suffix='_top', bot_suffix='_bot') -> Tuple[Path, Tuple[float, float, float, float]]:
+
+def extract_surface(
+    thesis_datafile: Path, top_suffix="_top", bot_suffix="_bot"
+) -> Tuple[Path, Tuple[float, float, float, float]]:
     """Extracts the top and bottom surfaces from a 3DThesis output solidification data
     CSV file and saves them into a new CSV file that is compatible with ML input vector.
-    
+
     Args:
         thesis_datafile: Path to the input 3DThesis solidification CSV file.
         top_suffix: Suffix to append to top surface columns.
@@ -300,12 +348,12 @@ def extract_surface(thesis_datafile: Path, top_suffix='_top', bot_suffix='_bot')
         tuple:
         - Path to the output CSV file with extracted surfaces.
         - A tuple of (min_x, min_y, max_x, max_y) bounds of the data."""
-   
+
     # Total path for source csv file
     if not thesis_datafile.exists():
         print(f"Warning: Thesis solidification file not found: {thesis_datafile}")
         return
-   
+
     # Total path for output csv file
     output_file = thesis_datafile.parent / "surfaces_thermal_input_vectors.csv"
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -314,47 +362,71 @@ def extract_surface(thesis_datafile: Path, top_suffix='_top', bot_suffix='_bot')
     if output_file.exists():
         # Get x and y bounds of the data
         final_df = pl.read_csv(output_file)
-        min_x = final_df['x'].min()
-        max_x = final_df['x'].max()
-        min_y = final_df['y'].min()
-        max_y = final_df['y'].max()
+        min_x = final_df["x"].min()
+        max_x = final_df["x"].max()
+        min_y = final_df["y"].min()
+        max_y = final_df["y"].max()
         bounds = (min_x, min_y, max_x, max_y)
         return (output_file, bounds)
 
     # Read in the full CSV file
     df = pl.read_csv(thesis_datafile)
- 
+
     # Define columns
-    cols = ["x" ,"y", "G", "V", "depth", "numMelt"] # initial columns in thesis data
-    both_cols = ["G", "V", "numMelt"] # columns to extract for both top and bottom
-    final_cols = ["x", "y", "G_top", "V_top", "depth", "numMelt_top", "G_bot", "V_bot", "numMelt_bot"] # final columns in output data
+    cols = ["x", "y", "G", "V", "depth", "numMelt"]  # initial columns in thesis data
+    both_cols = ["G", "V", "numMelt"]  # columns to extract for both top and bottom
+    final_cols = [
+        "x",
+        "y",
+        "G_top",
+        "V_top",
+        "depth",
+        "numMelt_top",
+        "G_bot",
+        "V_bot",
+        "numMelt_bot",
+    ]  # final columns in output data
 
     # Make top dataframe and add suffix
-    top_df = df.filter(pl.col('z') == pl.col('z').max())
-    top_df = top_df.select(cols).with_columns([pl.col(c).alias(f"{c}{top_suffix}") for c in both_cols])
+    top_df = df.filter(pl.col("z") == pl.col("z").max())
+    top_df = top_df.select(cols).with_columns(
+        [pl.col(c).alias(f"{c}{top_suffix}") for c in both_cols]
+    )
 
     # Extract the bottom surface
-    bottom_df = df.group_by(['x', 'y']).agg(pl.col('z').arg_min().alias('idx_bottom')).join(df.with_row_index(), left_on='idx_bottom', right_on='index').select(cols)
-    bottom_df = bottom_df.select(cols).with_columns([pl.col(c).alias(f"{c}{bot_suffix}") for c in both_cols])
+    bottom_df = (
+        df.group_by(["x", "y"])
+        .agg(pl.col("z").arg_min().alias("idx_bottom"))
+        .join(df.with_row_index(), left_on="idx_bottom", right_on="index")
+        .select(cols)
+    )
+    bottom_df = bottom_df.select(cols).with_columns(
+        [pl.col(c).alias(f"{c}{bot_suffix}") for c in both_cols]
+    )
 
     # Merge top and bottom dataframes
-    merged_df = top_df.join(
-        bottom_df,
-        on=['x', 'y'],
-        how='inner'
-    )
+    merged_df = top_df.join(bottom_df, on=["x", "y"], how="inner")
 
     # Drop and rename columns
     final_df = merged_df.select(final_cols)
-    
+
     # Save the combined data
     final_df.write_csv(output_file)
 
     # Get x and y bounds of the data
-    min_x = final_df['x'].min()
-    max_x = final_df['x'].max()
-    min_y = final_df['y'].min()
-    max_y = final_df['y'].max()
+    min_x = final_df["x"].min()
+    max_x = final_df["x"].max()
+    min_y = final_df["y"].min()
+    max_y = final_df["y"].max()
     bounds = (min_x, min_y, max_x, max_y)
 
     return (output_file, bounds)
+
+
+if __name__ == "__main__":
+    find_data_pairs(
+        "Z:/ConceptLaserM2-ORNL1/2024/01/2024-01-26 M2_AMMT_DOE_10/Myna/cases_ammt_doe_10",
+        case_dir_pattern="P*/R*",
+        case_input_pattern="Layer_*.zip/surfaces_thermal_FULL*.csv",
+        case_output_pattern="grain_analysis.csv",
+    )

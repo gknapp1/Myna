@@ -37,7 +37,7 @@ class DatasetNormalizer:
         self.isFit = False
 
         # Set nan fill option
-        self.nan_fill = None # TODO: allow setting in init
+        self.nan_fill = None  # TODO: allow setting in init
 
     @staticmethod
     def _nanstd(x: torch.Tensor, dim=None, keepdim=False, ddof=1):
@@ -226,7 +226,7 @@ class DatasetNormalizer:
             print(f"Warning: Could not apply NaN fill in normalizer: {e}")
             norm_inputs = torch.nan_to_num(norm_inputs, nan=0.0)
             norm_outputs = torch.nan_to_num(norm_outputs, nan=0.0)
-        
+
         return norm_inputs, norm_outputs
 
     def inverse_transform_outputs(self, norm_outputs: torch.Tensor):

@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 class Periodic3DCNN(nn.Module):
     """Expected input shape: (N, C, D, H, W) with H = W = 121, D = 4."""
+
     def __init__(self, in_channels=7, out_features=3, activation_fn=nn.ReLU):
         super(Periodic3DCNN, self).__init__()
 
@@ -44,9 +45,6 @@ class Periodic3DCNN(nn.Module):
         return mu + std * epsilon
 
     def forward(self, x):
-
-        # # Permute to PyTorch's expected format: (N, C, D, H, W).
-        # x = x.permute(0, 1, 4, 2, 3)
 
         # This pads ONLY the Depth dimension (now at index 2) circularly.
         padding_instruction = (0, 0, 0, 0, 1, 1)
